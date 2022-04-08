@@ -16,7 +16,7 @@ func main() {
   }
 
   app := &cli.App{
-    Name: "dropbox-backup",
+    Name: "backup",
     Usage: "Cli tool to backup files to dropbox",
     Commands: []*cli.Command{
       commands.NewBackupCommand(conf),

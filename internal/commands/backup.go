@@ -165,6 +165,7 @@ func exportToBox(conf config.Configuration, file *os.File) error {
 }
 
 func addToArchive(tw *tar.Writer, filename string, file io.Reader, info os.FileInfo) error {
+  log.Println("Adding " + filename)
   header, err := tar.FileInfoHeader(info, info.Name())
   if err != nil {
     return err
@@ -190,6 +191,10 @@ func addFilesToArchive(tw *tar.Writer, files []string) error {
     filenames, err := filepath.Glob(filenameOrGlob)
     if err != nil {
       return err
+    }
+
+    if len(filenames) <= 0 {
+      return errors.New("No files found for backup")
     }
 
     for _, filename := range filenames {
@@ -253,7 +258,33 @@ func createArchive(files []string, buf io.Writer) error {
   return nil
 }
 
-func dropboxCommandAction(conf config.Configuration, c *cli.Context) error {
+func moveFile(oldFileName string, newFileName string) error {
+  oldFile, err := os.Open(oldFileName)
+  if err != nil {
+    return err
+  }
+
+  newFile, err := os.Create(newFileName)
+  if err != nil {
+    return err
+  }
+  defer newFile.Close()
+
+  _, err = io.Copy(newFile, oldFile)
+  oldFile.Close()
+  if err != nil {
+    return err
+  }
+
+  err = os.Remove(oldFileName)
+  if err != nil {
+    return err
+  }
+
+  return nil
+}
+
+func boxCommandAction(conf config.Configuration, c *cli.Context) error {
   outputDirectory := c.String(OUTPUT_DIRECTORY_FLAG)
   err := os.MkdirAll(outputDirectory, os.ModePerm)
   if err != nil {
@@ -262,23 +293,34 @@ func dropboxCommandAction(conf config.Configuration, c *cli.Context) error {
 
   currentTimeUnix := time.Now().UTC().UnixMilli()
 
+  outputFileName := strconv.FormatInt(currentTimeUnix, 10) + ".tar.gz"
+
   // create output file
   outputPath := filepath.Join(
     c.String(OUTPUT_DIRECTORY_FLAG),
-    strconv.FormatInt(currentTimeUnix, 10) + ".tar.gz",
+    outputFileName,
   )
 
-  out, err := os.Create(outputPath)
+  tmpOut, err := ioutil.TempFile("", outputFileName)
   if err != nil {
     log.Fatal("Error backing up files:", err)
   }
 
   filenames := c.Args().Slice()
-  err = createArchive(filenames, out)
+  err = createArchive(filenames, tmpOut)
   if err != nil {
     log.Fatal("Error backing up files:", err)
   }
-  out.Close()
+
+  err = tmpOut.Close()
+  if err != nil {
+    return err
+  }
+
+  err = moveFile(tmpOut.Name(), outputPath)
+  if err != nil {
+    return err
+  }
 
   outputFile, err := os.Open(outputPath)
   if err != nil {
@@ -297,11 +339,11 @@ func dropboxCommandAction(conf config.Configuration, c *cli.Context) error {
 
 func NewBackupCommand(conf config.Configuration) *cli.Command {
   commandAction := func(c *cli.Context) error {
-    return dropboxCommandAction(conf, c)
+    return boxCommandAction(conf, c)
   }
 
   return &cli.Command{
-    Name: "dropbox",
+    Name: "box",
     Usage: "Command to backup to dropbox",
     Flags: []cli.Flag{
       &cli.StringFlag{
