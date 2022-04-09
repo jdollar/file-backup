@@ -5,8 +5,8 @@ import (
 	"os"
 
 	"github.com/urfave/cli/v2"
-	"github.com/jdollar/dropbox-backup/internal/commands"
-	"github.com/jdollar/dropbox-backup/internal/config"
+	"github.com/jdollar/backup/internal/commands"
+	"github.com/jdollar/backup/internal/config"
 )
 
 func main() {

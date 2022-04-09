@@ -1,7 +1,6 @@
 package box
 
 import (
-	"bufio"
 	"bytes"
   "log"
 	"context"
@@ -19,9 +18,13 @@ import (
   "strconv"
   "sort"
 
+  "github.com/jdollar/backup/internal/files"
+
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 )
+
+const TWENTY_MB = 20*1024
 
 type ClientOpts struct {
   SubjectType string
@@ -79,12 +82,20 @@ func (c *Client) handleResponse(resp *http.Response, result interface{}) error {
   return nil
 }
 
+func (c *Client) makeRequest(req *http.Request, resp interface{}) error {
+  rawResp, err := c.httpClient.Do(req)
+  if err != nil {
+    return err
+  }
+
+  return c.handleResponse(rawResp, &resp)
+}
 
 func (c *Client) SearchFolders(name string) (SearchResponse, error) {
   var searchResponse SearchResponse
 
   req, err := http.NewRequest(
-    "GET",
+    http.MethodGet,
     "https://api.box.com/2.0/search",
     nil,
   )
@@ -93,26 +104,18 @@ func (c *Client) SearchFolders(name string) (SearchResponse, error) {
   }
 
   q := req.URL.Query()
-  q.Add("query", "minecraftBackups")
+  q.Add("query", name)
   req.URL.RawQuery = q.Encode()
 
-  resp, err := c.httpClient.Do(req)
-  if err != nil {
-    return searchResponse, err
-  }
-  err = c.handleResponse(resp, &searchResponse)
-  if err != nil {
-    return searchResponse, err
-  }
-
-  return searchResponse, nil
+  err = c.makeRequest(req, &searchResponse)
+  return searchResponse, err
 }
 
 func (c *Client) ListItemsInFolder(folder Folder, limit int64, offset int64) (ListItemsInFolderResponse, error) {
   var resp ListItemsInFolderResponse
 
   req, err := http.NewRequest(
-    "GET",
+    http.MethodGet,
     fmt.Sprintf("https://api.box.com/2.0/folders/%s/items", folder.Id),
     nil,
   )
@@ -127,16 +130,8 @@ func (c *Client) ListItemsInFolder(folder Folder, limit int64, offset int64) (Li
   q.Add("direction", "DESC")
   req.URL.RawQuery = q.Encode()
 
-  rawResp, err := c.httpClient.Do(req)
-  if err != nil {
-    return resp, err
-  }
-  err = c.handleResponse(rawResp, &resp)
-  if err != nil {
-    return resp, err
-  }
-
-  return resp, nil
+  err = c.makeRequest(req, &resp)
+  return resp, err
 }
 
 func (c *Client) DeleteFile(file File) error {
@@ -149,16 +144,8 @@ func (c *Client) DeleteFile(file File) error {
     return err
   }
 
-  rawResp, err := c.httpClient.Do(req)
-  if err != nil {
-    return err
-  }
-  err = c.handleResponse(rawResp, nil)
-  if err != nil {
-    return err
-  }
-
-  return nil
+  err = c.makeRequest(req, nil)
+  return err
 }
 
 func (c *Client) CreateBackupFolder(reqBody CreateFolderRequest) (CreateFolderResponse, error) {
@@ -170,7 +157,7 @@ func (c *Client) CreateBackupFolder(reqBody CreateFolderRequest) (CreateFolderRe
   }
 
   req, err := http.NewRequest(
-    "POST",
+    http.MethodPost,
     "https://api.box.com/2.0/folders",
     bytes.NewBuffer(jsonBody),
   )
@@ -178,47 +165,29 @@ func (c *Client) CreateBackupFolder(reqBody CreateFolderRequest) (CreateFolderRe
     return resp, err
   }
 
-  rawResp, err := c.httpClient.Do(req)
-  if err != nil {
-    return resp, err
-  }
-
-  err = c.handleResponse(rawResp, &resp)
-  if err != nil {
-    return resp, err
-  }
-
-  return resp, nil
+  err = c.makeRequest(req, &resp)
+  return resp, err
 }
 
 func (c *Client) CreateUploadSession(req CreateUploadSessionRequest) (CreateUploadSessionResponse, error) {
-  var createUploadSessionResponse CreateUploadSessionResponse
+  var resp CreateUploadSessionResponse
 
   jsonBody, err := json.Marshal(req)
   if err != nil {
-    return createUploadSessionResponse, err
+    return resp, err
   }
 
   httpReq, err := http.NewRequest(
-    "POST",
+    http.MethodPost,
     "https://upload.box.com/api/2.0/files/upload_sessions",
     bytes.NewBuffer(jsonBody),
   )
   if err != nil {
-    return createUploadSessionResponse, err
+    return resp, err
   }
 
-  rawCreateSessionResp, err := c.httpClient.Do(httpReq)
-  if err != nil {
-    return createUploadSessionResponse, err
-  }
-
-  err = c.handleResponse(rawCreateSessionResp, &createUploadSessionResponse)
-  if err != nil {
-    return createUploadSessionResponse, err
-  }
-
-  return createUploadSessionResponse, nil
+  err = c.makeRequest(httpReq, &resp)
+  return resp, err
 }
 
 func (c *Client) GetUploadSession(sessionId string) (GetUploadSessionResponse, error) {
@@ -233,17 +202,8 @@ func (c *Client) GetUploadSession(sessionId string) (GetUploadSessionResponse, e
     return resp, err
   }
 
-  rawResp, err := c.httpClient.Do(httpReq)
-  if err != nil {
-    return resp, err
-  }
-
-  err = c.handleResponse(rawResp, &resp)
-  if err != nil {
-    return resp, err
-  }
-
-  return resp, nil
+  err = c.makeRequest(httpReq, &resp)
+  return resp, err
 }
 
 type ByOffset []UploadPart
@@ -253,7 +213,7 @@ func (a ByOffset) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByOffset) Less(i, j int) bool { return a[i].Offset < a[j].Offset }
 
 func (c *Client) CommitUploadSession(sessionId string, parts []UploadPart, digest string) (CommitUploadSessionResponse, error) {
-  var commitUploadSessionResponse CommitUploadSessionResponse
+  var resp CommitUploadSessionResponse
 
   sort.Sort(ByOffset(parts))
 
@@ -263,38 +223,22 @@ func (c *Client) CommitUploadSession(sessionId string, parts []UploadPart, diges
 
   jsonBody, err := json.Marshal(req)
   if err != nil {
-    return commitUploadSessionResponse, err
+    return resp, err
   }
 
   httpReq, err := http.NewRequest(
-    "POST",
+    http.MethodPost,
     fmt.Sprintf("https://upload.box.com/api/2.0/files/upload_sessions/%s/commit", sessionId),
     bytes.NewBuffer(jsonBody),
   )
   if err != nil {
-    return commitUploadSessionResponse, err
+    return resp, err
   }
 
   httpReq.Header.Set("digest", "sha=" + digest)
 
-  rawCommitSessionResp, err := c.httpClient.Do(httpReq)
-  if err != nil {
-    return commitUploadSessionResponse, err
-  }
-
-  err = c.handleResponse(rawCommitSessionResp, &commitUploadSessionResponse)
-  if err != nil {
-    return commitUploadSessionResponse, err
-  }
-
-  return commitUploadSessionResponse, nil
-}
-
-type FilePart struct {
-  Begin int64
-  End int64
-  Data []byte
-  Digest string
+  err = c.makeRequest(httpReq, &resp)
+  return resp, err
 }
 
 type UploadAttributes struct {
@@ -310,7 +254,7 @@ func (c *Client) Upload(folder Folder, file *os.File) error {
     return err
   }
 
-  if info.Size() >= 20*1024 {
+  if info.Size() >= TWENTY_MB {
     return c.chunkedUpload(folder, file)
   }
 
@@ -372,18 +316,9 @@ func (c *Client) singleUpload(folder Folder, file *os.File) error {
 
   httpReq.Header.Set("Content-Type", w.FormDataContentType())
 
-  rawUploadResp, err := c.httpClient.Do(httpReq)
-  if err != nil {
-    return err
-  }
-
-  var uploadResponse UploadResponse
-  err = c.handleResponse(rawUploadResp, &uploadResponse)
-  if err != nil {
-    return err
-  }
-
-  return nil
+  var resp UploadResponse
+  err = c.makeRequest(httpReq, &resp)
+  return err
 }
 
 func (c *Client) chunkedUpload(folder Folder, file *os.File) error {
@@ -407,69 +342,39 @@ func (c *Client) chunkedUpload(folder Folder, file *os.File) error {
   }
   log.Println("Created upload session")
 
-  nBytes := int64(0)
-  r := bufio.NewReader(file)
-  buf := make([]byte, 0, createUploadSessionResponse.PartSize)
-
-  var parts []FilePart
-  for {
-    n, err := r.Read(buf[:cap(buf)])
-    buf = buf[:n]
-    if n == 0 {
-      if err == nil {
-        continue
-      }
-
-      if err == io.EOF {
-        break
-      }
-
-      return err
-    }
-
-    begin := nBytes
-    end := begin + int64(len(buf) - 1)
-    h := sha1.New()
-    h.Write(buf)
-    d := h.Sum(nil)
-
-    data := make([]byte, len(buf))
-    copy(data, buf)
-
-    part := FilePart{
-      Begin: begin,
-      End: end,
-      Data: data,
-      Digest: base64.StdEncoding.EncodeToString(d),
-    }
-    parts = append(parts, part)
-
-    nBytes += int64(len(buf))
-    if err != nil && err != io.EOF {
-      return err
-    }
+  parts, err := files.ChunkFile(file, createUploadSessionResponse.PartSize)
+  if err != nil {
+    return err
   }
 
   var uploadedParts []UploadPart
   uploadChan := make(chan error)
   for _, part := range parts {
-    go func(part FilePart) {
+    go func(part files.FilePart) {
       httpReq, err := http.NewRequest(
         http.MethodPut,
         fmt.Sprintf("https://upload.box.com/api/2.0/files/upload_sessions/%s", createUploadSessionResponse.Id),
         bytes.NewBuffer(part.Data),
       )
 
-      httpReq.Header.Set("content-type", "application/octet-stream")
-      httpReq.Header.Set("content-range", fmt.Sprintf("bytes %d-%d/%d", part.Begin, part.End, info.Size()))
-      httpReq.Header.Set("digest", fmt.Sprintf("sha=%s", part.Digest))
+      base64encodedDigest := base64.StdEncoding.EncodeToString(part.Digest)
 
-      log.Println("Uploading part")
+      httpReq.Header.Set("content-type", "application/octet-stream")
+      httpReq.Header.Set(
+        "content-range",
+        fmt.Sprintf("bytes %d-%d/%d", part.Begin, part.End, info.Size()),
+      )
+      httpReq.Header.Set(
+        "digest",
+        fmt.Sprintf("sha=%s", base64encodedDigest),
+      )
+
+      log.Println("Uploading part " + base64encodedDigest)
       rawUploadResp, err := c.httpClient.Do(httpReq)
       if err != nil {
         uploadChan <- err
       }
-      log.Println("Finished uploading part")
+      log.Println("Finished uploading part " + base64encodedDigest)
 
       var uploadPartResponse UploadPartResponse
       err = c.handleResponse(rawUploadResp, &uploadPartResponse)

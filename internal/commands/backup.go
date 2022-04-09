@@ -1,21 +1,22 @@
 package commands
 
 import (
-  "context"
 	"archive/tar"
-  "errors"
 	"compress/gzip"
+	"context"
+	"errors"
 	"io"
 	"io/ioutil"
 	"log"
 	"os"
-  "path/filepath"
-  "time"
-  "strconv"
+	"path/filepath"
+	"strconv"
+	"time"
+  "sort"
 
+	"github.com/jdollar/backup/internal/box"
+	"github.com/jdollar/backup/internal/config"
 	"github.com/urfave/cli/v2"
-  "github.com/jdollar/dropbox-backup/internal/box"
-  "github.com/jdollar/dropbox-backup/internal/config"
 )
 
 const OUTPUT_DIRECTORY_FLAG = "outputDirectory"
@@ -160,6 +161,39 @@ func exportToBox(conf config.Configuration, file *os.File) error {
     }
   }
   log.Println("Finished cleaning old backups")
+
+  return nil
+}
+
+type ByName []string
+
+func (a ByName) Len() int           { return len(a) }
+func (a ByName) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByName) Less(i, j int) bool { return a[i] < a[j] }
+
+func fileSystemCleanup(conf config.Configuration, outputPath string) error {
+  filenames, err := filepath.Glob(outputPath + "/*.tar.gz")
+  if err != nil {
+    return err
+  }
+
+  numberToRemove := int64(len(filenames)) - conf.BackupLimit
+  if numberToRemove <= 0 {
+    log.Println("No files to remove for local backup")
+    return nil
+  }
+
+  sort.Sort(ByName(filenames))
+
+  filesToRemove := filenames[:numberToRemove]
+
+  for _, filename := range filesToRemove {
+    log.Println("Removing " + filename)
+    err := os.Remove(filename)
+    if err != nil {
+      return  err
+    }
+  }
 
   return nil
 }
@@ -327,6 +361,12 @@ func boxCommandAction(conf config.Configuration, c *cli.Context) error {
     log.Fatal("Error exporting file:", err)
   }
   defer outputFile.Close()
+
+  err = fileSystemCleanup(conf, c.String(OUTPUT_DIRECTORY_FLAG))
+  if err != nil {
+    return err
+  }
+
 
   log.Println(outputPath)
   err = exportToBox(conf, outputFile)

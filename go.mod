@@ -1,4 +1,4 @@
-module github.com/jdollar/dropbox-backup
+module github.com/jdollar/backup
 
 go 1.18
 
