@@ -32,6 +32,7 @@ func initializeConfig(configDir string) error {
   }
 
   defaultConfig := Configuration{
+    BackupLimit: 50,
     Box: BoxConfiguration{
       BackupFolderName: "minecraftBackups",
     },

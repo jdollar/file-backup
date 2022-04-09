@@ -73,11 +73,17 @@ type CreateUploadSessionResponse struct {
   TotalParts int32 `json:"total_parts"`
 }
 
+type GetUploadSessionResponse struct {
+  Id string `json:"id"`
+  NumPartsProcessed int32 `json:"num_parts_processed"`
+  TotalParts int32 `json:"total_parts"`
+}
+
 type UploadPart struct {
   Offset int64 `json:"offset"`
   PartId string `json:"part_id"`
-  sha1 string `json:"sha1"`
-  size int64 `json:"size"`
+  Sha1 string `json:"sha1"`
+  Size int64 `json:"size"`
 }
 
 type CommitUploadSessionRequest struct {

@@ -3,6 +3,7 @@ package box
 import (
 	"bufio"
 	"bytes"
+  "log"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
@@ -16,6 +17,7 @@ import (
   "mime/multipart"
   "time"
   "strconv"
+  "sort"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
@@ -219,8 +221,41 @@ func (c *Client) CreateUploadSession(req CreateUploadSessionRequest) (CreateUplo
   return createUploadSessionResponse, nil
 }
 
-func (c *Client) CommitUploadSession(sessionId string, parts []UploadPart) (CommitUploadSessionResponse, error) {
+func (c *Client) GetUploadSession(sessionId string) (GetUploadSessionResponse, error) {
+  var resp GetUploadSessionResponse
+
+  httpReq, err := http.NewRequest(
+    http.MethodGet,
+    fmt.Sprintf("https://upload.box.com/api/2.0/files/upload_sessions/%s", sessionId),
+    nil,
+  )
+  if err != nil {
+    return resp, err
+  }
+
+  rawResp, err := c.httpClient.Do(httpReq)
+  if err != nil {
+    return resp, err
+  }
+
+  err = c.handleResponse(rawResp, &resp)
+  if err != nil {
+    return resp, err
+  }
+
+  return resp, nil
+}
+
+type ByOffset []UploadPart
+
+func (a ByOffset) Len() int           { return len(a) }
+func (a ByOffset) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByOffset) Less(i, j int) bool { return a[i].Offset < a[j].Offset }
+
+func (c *Client) CommitUploadSession(sessionId string, parts []UploadPart, digest string) (CommitUploadSessionResponse, error) {
   var commitUploadSessionResponse CommitUploadSessionResponse
+
+  sort.Sort(ByOffset(parts))
 
   req := CommitUploadSessionRequest{
     Parts: parts,
@@ -239,6 +274,8 @@ func (c *Client) CommitUploadSession(sessionId string, parts []UploadPart) (Comm
   if err != nil {
     return commitUploadSessionResponse, err
   }
+
+  httpReq.Header.Set("digest", "sha=" + digest)
 
   rawCommitSessionResp, err := c.httpClient.Do(httpReq)
   if err != nil {
@@ -281,6 +318,8 @@ func (c *Client) Upload(folder Folder, file *os.File) error {
 }
 
 func (c *Client) singleUpload(folder Folder, file *os.File) error {
+  log.Println("Doing single upload")
+
   body := &bytes.Buffer{}
   w := multipart.NewWriter(body)
 
@@ -348,9 +387,29 @@ func (c *Client) singleUpload(folder Folder, file *os.File) error {
 }
 
 func (c *Client) chunkedUpload(folder Folder, file *os.File) error {
+  log.Println("Doing chunk upload")
+
+  info, err := file.Stat()
+  if err != nil {
+    return err
+  }
+
+  createSessionReq := CreateUploadSessionRequest{
+    FileName: info.Name(),
+    FileSize: info.Size(),
+    FolderId: folder.Id,
+  }
+
+  log.Println("Creating upload session")
+  createUploadSessionResponse, err := c.CreateUploadSession(createSessionReq)
+  if err != nil {
+    return err
+  }
+  log.Println("Created upload session")
+
   nBytes := int64(0)
   r := bufio.NewReader(file)
-  buf := make([]byte, 0, 4*1024)
+  buf := make([]byte, 0, createUploadSessionResponse.PartSize)
 
   var parts []FilePart
   for {
@@ -369,15 +428,19 @@ func (c *Client) chunkedUpload(folder Folder, file *os.File) error {
     }
 
     begin := nBytes
-    end := begin + int64(len(buf))
-    digest := sha1.New()
-    digest.Write(buf)
+    end := begin + int64(len(buf) - 1)
+    h := sha1.New()
+    h.Write(buf)
+    d := h.Sum(nil)
+
+    data := make([]byte, len(buf))
+    copy(data, buf)
 
     part := FilePart{
       Begin: begin,
       End: end,
-      Data: buf,
-      Digest: base64.StdEncoding.EncodeToString(digest.Sum(nil)),
+      Data: data,
+      Digest: base64.StdEncoding.EncodeToString(d),
     }
     parts = append(parts, part)
 
@@ -387,54 +450,85 @@ func (c *Client) chunkedUpload(folder Folder, file *os.File) error {
     }
   }
 
-  fmt.Println(parts)
-
-  info, err := file.Stat()
-  if err != nil {
-    return err
-  }
-
-  createSessionReq := CreateUploadSessionRequest{
-    FileName: info.Name(),
-    FileSize: info.Size(),
-    FolderId: folder.Id,
-  }
-
-  createUploadSessionResponse, err := c.CreateUploadSession(createSessionReq)
-  if err != nil {
-    return err
-  }
-
   var uploadedParts []UploadPart
+  uploadChan := make(chan error)
   for _, part := range parts {
-    httpReq, err := http.NewRequest(
-      "POST",
-      fmt.Sprintf("https://upload.box.com/api/2.0/files/upload_sessions/%s", createUploadSessionResponse.Id),
-      bytes.NewBuffer(part.Data),
-    )
+    go func(part FilePart) {
+      httpReq, err := http.NewRequest(
+        http.MethodPut,
+        fmt.Sprintf("https://upload.box.com/api/2.0/files/upload_sessions/%s", createUploadSessionResponse.Id),
+        bytes.NewBuffer(part.Data),
+      )
 
-    httpReq.Header.Set("Content-Type", "application/octet-stream")
-    httpReq.Header.Set("content-range", fmt.Sprintf("%d - %d/%d", part.Begin, part.End, part.End - part.Begin))
-    httpReq.Header.Set("digest", fmt.Sprintf("sha1=%s", part.Digest))
+      httpReq.Header.Set("content-type", "application/octet-stream")
+      httpReq.Header.Set("content-range", fmt.Sprintf("bytes %d-%d/%d", part.Begin, part.End, info.Size()))
+      httpReq.Header.Set("digest", fmt.Sprintf("sha=%s", part.Digest))
 
-    rawUploadResp, err := c.httpClient.Do(httpReq)
-    if err != nil {
-      return err
-    }
+      log.Println("Uploading part")
+      rawUploadResp, err := c.httpClient.Do(httpReq)
+      if err != nil {
+        uploadChan <- err
+      }
+      log.Println("Finished uploading part")
 
-    var uploadPartResponse UploadPartResponse
-    err = c.handleResponse(rawUploadResp, &uploadPartResponse)
-    if err != nil {
-      return err
-    }
+      var uploadPartResponse UploadPartResponse
+      err = c.handleResponse(rawUploadResp, &uploadPartResponse)
+      if err != nil {
+        uploadChan <- err
+      }
 
-    uploadedParts = append(uploadedParts, uploadPartResponse.Part)
+      uploadedParts = append(uploadedParts, uploadPartResponse.Part)
+
+      uploadChan <- nil
+    }(part)
   }
 
-  _, err = c.CommitUploadSession(createUploadSessionResponse.Id, uploadedParts)
+  for i := 0; i < len(parts); i++ {
+    err = <- uploadChan
+    if err != nil {
+      return err
+    }
+  }
+
+  log.Println("Checking session state")
+
+  for {
+    getUploadSessionResponse, err := c.GetUploadSession(createUploadSessionResponse.Id)
+    if err != nil {
+      return err
+    }
+
+    processed := getUploadSessionResponse.NumPartsProcessed
+    total := getUploadSessionResponse.TotalParts
+
+    if processed == total {
+      break
+    }
+
+    log.Println(strconv.FormatInt(int64(processed), 10) + " processed out of " + strconv.FormatInt(int64(total), 10))
+    time.Sleep(1 * time.Second)
+  }
+
+  log.Println("Session Ready!")
+
+  log.Println("Committing session")
+  fileHash := sha1.New()
+  digestFile, err := os.Open(file.Name())
   if err != nil {
     return err
   }
+  defer digestFile.Close()
+
+  if _, err := io.Copy(fileHash, digestFile); err != nil {
+    return err
+  }
+  digest := base64.StdEncoding.EncodeToString(fileHash.Sum(nil))
+
+  _, err = c.CommitUploadSession(createUploadSessionResponse.Id, uploadedParts, digest)
+  if err != nil {
+    return err
+  }
+  log.Println("Commited session")
 
   return nil
 }
